@@ -23,29 +23,58 @@ if __name__ == '__main__':
     # Let's create our topology first, as an example
     # ============================================
     topo = Topology('Abilene', 'data/topologies/Abilene.graphml')
+    # print("topo.name %s\ntopo.nodes: %s\n\n" % (topo.name, topo.nodes()))
+
     # Let's load an existing gravity traffic matrix. It's just a dict mapping ingress-egress tuples to flow volume (a float).
     trafficMatrix = TrafficMatrix.load('data/tm/Abilene.tm')
     # set nodes to be firewalls and IDSes:
     for node in topo.nodes():
         topo.setMbox(node)
         topo.setServiceTypes(node, ['fw', 'ids'])
+        print("topo.getServiceTypes(): %s\n" % topo.getServiceTypes(node))
 
     trafficClasses = generateTrafficClasses(trafficMatrix.keys(), trafficMatrix, {'allTraffic': 1},
                                             {'allTraffic': 2000})
+    print("trafficMatrix.keys(): %s\n" % trafficMatrix.keys())
+
     # assign flow processing cost for each traffic class
     for t in trafficClasses:
         t.cpuCost = 10
+        print("\ntrafficClass: %s" % t)
+        print("trafficClass.volBytes: %s" % t.volBytes)
+        print("trafficClass.volFlows: %s" % t.volFlows)
 
     # Do some topology provisioning, instead of the real switch/link/middlebox capacities:
     # provision the node cpu capacities (for the sake of example)
     maxCPUCap = provisioning.computeMaxIngressLoad(trafficClasses, {t: t.cpuCost for t in trafficClasses})
+    print("maxCPUCap: %d\n" % maxCPUCap)
     nodeCaps = dict()
+    # we assign equal compute capacity to all switches. The value is the maximum
+    # number of CPUs required to handle flows. For this, we look at each node
+    # (switch), extract number of flows passing that node (looking at the
+    # tc.volFlows which is equal to the traffic matrix value at .tm input file) 
+    # and multiply it with the CPU cost associated with each flow (cpuCost=10 in
+    # this case). We sum this multiplication result for each flow and get a
+    # single maximum value which is assigned as the CPU of each node. In fact,
+    # we multiply this max value to 2 (see below), which I believe represents
+    # chain length, i.e., fw and ids will consume double amount if the max CPU.
+    # This essentially means switches are never CPU saturated (is it true?).
     nodeCaps['cpu'] = {node: maxCPUCap * 2 for node in topo.nodes()
                        if 'fw' or 'ids' in topo.getServiceTypes(node)}
+    print("nodeCaps: %s\n" % nodeCaps)
+
     # provision the TCAM capacities on the switch nodes
+    # in this example, all switches have equal TCAM space of 1000.
     nodeCaps['tcam'] = {node: 1000 for node in topo.nodes()}
+    print("nodeCaps: %s\n" % nodeCaps)
+
     # similartly with link capacities
+    # we do CPU-like computation for linkCaps (see more elaborate description
+    # above, the one for nodeCaps). Essentially, all linkCaps have the same
+    # value and it is the maximum link capacity required to handle the entire
+    # flow.
     linkCaps = provisioning.provisionLinks(topo, trafficClasses, 3)
+    print("linkCaps: %s\n" % linkCaps)
 
 
     # =====================================
@@ -54,6 +83,8 @@ if __name__ == '__main__':
 
     def path_predicate(path, topology):
         # Firewall followed by IDS is the requirement for the path to be valid
+        # print("path: %s\ntopology: %s" % (path, topology))
+        # print("topology.getServiceTypes: %s" % (topology.getServiceTypes()))
         return any([s == ('fw', 'ids') for s in itertools.product(*[topology.getServiceTypes(node)
                                                                     for node in path.useMBoxes])])
 
@@ -66,6 +97,9 @@ if __name__ == '__main__':
             raise ValueError("wrong resource")  # just in case
 
     def linkCapFunc(link, tc, path, resource, linkCaps):
+        print("tc.name %s, tc.volBytes: %d" % (tc.name, tc.volBytes))
+        print("linkCaps[link]: %d" % linkCaps[link])
+        print("result: %f" % (tc.volBytes / linkCaps[link]))
         return tc.volBytes / linkCaps[link]
 
     # Curry the functions to conform to the required signature
@@ -84,6 +118,7 @@ if __name__ == '__main__':
     # start our optimization
     # ======================
     # Get paths that conform to our path predicate, choose a subset of 5 randomly to route traffic on.
+    # pptc = Path Per Traffic Class
     opt, pptc = initOptimization(topo, trafficClasses, path_predicate,
                                  'random', 5, functools.partial(useMboxModifier, chainLength=2), 'CPLEX')
 
@@ -111,8 +146,9 @@ if __name__ == '__main__':
     opt.solve()
 
     # Print the objective function --- in this case the load on the maximally loaded middlebox [0, 1]
-    print opt.getSolvedObjective()
+    print("objective: %f" % opt.getSolvedObjective())
     # pretty-print the paths on which the traffic is routed, along with the fraction for each traffic class
     # useMBoxes indicates at which middleboxes the processing should occur
     for tc, paths in opt.getPathFractions(pptc).iteritems():
         print 'src:', tc.src, 'dst:', tc.dst, 'paths:', pprint.pformat(paths)
+    print("len(opt.getPathFractions()): %d" % len(opt.getPathFractions(pptc)))
